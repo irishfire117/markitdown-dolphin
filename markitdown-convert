@@ -1,0 +1,209 @@
+#!/usr/bin/python3
+"""Convert files to Markdown with MarkItDown, saving "name.ext" as "name.md"
+next to the original. Used by the Dolphin service menu
+~/.local/share/kio/servicemenus/markitdown.desktop
+
+https://github.com/irishfire117/markitdown-dolphin
+
+Progress is shown as a KDE job in the notification area (like a Dolphin file
+copy), with a cancel button that kills the conversion and removes the partial
+output. Falls back to plain notify-send if the job tracker isn't available.
+"""
+import os
+import shutil
+import signal
+import subprocess
+import sys
+
+from gi.repository import Gio, GLib
+
+APP_ID = "markitdown-convert"   # ~/.local/share/applications/markitdown-convert.desktop
+KILLABLE = 0x0001               # KJob::Killable
+KILLED = 1                      # KJob::KilledJobError
+USER_ERROR = 100                # KJob::UserDefinedError
+
+# Dolphin's session PATH often lacks ~/.local/bin, where pipx/uv install tools
+MARKITDOWN = os.environ.get("MARKITDOWN") or shutil.which(
+    "markitdown",
+    path=os.pathsep.join([os.environ.get("PATH", ""),
+                          os.path.expanduser("~/.local/bin")]))
+
+
+def output_path(src):
+    """name.ext -> name.md, then name (1).md, name (2).md, ... never overwrite."""
+    directory, file = os.path.split(os.path.abspath(src))
+    stem = os.path.splitext(file)[0] or file
+    out = os.path.join(directory, f"{stem}.md")
+    n = 1
+    while os.path.exists(out):
+        out = os.path.join(directory, f"{stem} ({n}).md")
+        n += 1
+    return out
+
+
+def notify(icon, title, body):
+    subprocess.run(["notify-send", "-a", "MarkItDown", "-i", icon, title, body],
+                   check=False)
+
+
+def v(value):
+    """Wrap a Python value as a GLib variant for an a{sv} dict."""
+    if isinstance(value, bool):
+        return GLib.Variant("b", value)
+    if isinstance(value, int):
+        return GLib.Variant("u", value)
+    return GLib.Variant("s", value)
+
+
+class JobView:
+    """A job entry in Plasma's notification area (org.kde.JobViewServerV2)."""
+
+    def __init__(self, bus, on_cancel):
+        self.bus = bus
+        reply = bus.call_sync(
+            "org.kde.JobViewServer", "/JobViewServer",
+            "org.kde.JobViewServerV2", "requestView",
+            GLib.Variant("(sia{sv})", (APP_ID, KILLABLE, {})),
+            GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, 2000, None)
+        self.path = reply.unpack()[0]
+        bus.signal_subscribe(
+            "org.kde.JobViewServer", "org.kde.JobViewV3", "cancelRequested",
+            self.path, None, Gio.DBusSignalFlags.NONE,
+            lambda *_: on_cancel())
+
+    def _call(self, method, args):
+        self.bus.call_sync("org.kde.JobViewServer", self.path, "org.kde.JobViewV3",
+                           method, args, None, Gio.DBusCallFlags.NO_AUTO_START,
+                           -1, None)
+
+    def update(self, **props):
+        self._call("update", GLib.Variant(
+            "(a{sv})", ({k: v(x) for k, x in props.items()},)))
+
+    def terminate(self, code=0, message="", **hints):
+        self._call("terminate", GLib.Variant(
+            "(usa{sv})", (code, message, {k: v(x) for k, x in hints.items()})))
+        self.bus.flush_sync(None)
+
+
+class Converter:
+    def __init__(self, files):
+        self.files = files
+        self.index = -1
+        self.proc = None
+        self.output = None
+        self.done = []
+        self.failed = []
+        self.cancelled = False
+        self.loop = GLib.MainLoop()
+        try:
+            self.job = JobView(Gio.bus_get_sync(Gio.BusType.SESSION), self.cancel)
+        except GLib.Error:
+            self.job = None
+
+    def run(self):
+        if self.job:
+            self.job.update(totalFiles=len(self.files), processedFiles=0)
+        GLib.idle_add(self.next_file)
+        self.loop.run()
+
+    def next_file(self):
+        self.index += 1
+        if self.cancelled or self.index >= len(self.files):
+            self.finish()
+            return False
+
+        src = self.files[self.index]
+        name = os.path.basename(src)
+        if not os.path.isfile(src):
+            self.failed.append((name, "not a file"))
+            GLib.idle_add(self.next_file)
+            return False
+
+        self.output = output_path(src)
+        if self.job:
+            self.job.update(
+                title="Converting to Markdown",
+                infoMessage=f"Converting {name}",
+                descriptionLabel1="Source", descriptionValue1=os.path.abspath(src),
+                descriptionLabel2="Destination", descriptionValue2=self.output,
+                processedFiles=self.index,
+                percent=int(100 * self.index / len(self.files)))
+
+        self.proc = subprocess.Popen(
+            [MARKITDOWN, src, "-o", self.output],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            start_new_session=True)
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, self.proc.pid, self.on_exit, src)
+        return False
+
+    def on_exit(self, _pid, _status, src):
+        name = os.path.basename(src)
+        err = self.proc.stderr.read().strip()
+        code = self.proc.wait()
+        self.proc = None
+        if self.cancelled:
+            self.remove_partial()
+        elif code == 0 and os.path.getsize(self.output) > 0:
+            self.done.append(self.output)
+        else:
+            self.remove_partial()
+            reason = err.splitlines()[-1] if err else f"exit code {code}"
+            self.failed.append((name, reason))
+        GLib.idle_add(self.next_file)
+
+    def cancel(self):
+        self.cancelled = True
+        if self.proc and self.proc.poll() is None:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+            GLib.timeout_add_seconds(2, self.force_kill, self.proc)
+
+    @staticmethod
+    def force_kill(proc):
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+        return False
+
+    def remove_partial(self):
+        try:
+            os.remove(self.output)
+        except FileNotFoundError:
+            pass
+
+    def finish(self):
+        total = len(self.files)
+        if self.cancelled:
+            summary = f"Cancelled. {len(self.done)} of {total} converted."
+        elif self.failed:
+            summary = f"{len(self.done)} of {total} converted. Failed:\n" + "\n".join(
+                f"{n}: {r}" for n, r in self.failed)
+        else:
+            summary = None
+
+        if self.job:
+            self.job.update(processedFiles=len(self.done), percent=100)
+            if self.cancelled:
+                self.job.terminate(KILLED, summary)
+            elif self.failed:
+                self.job.terminate(USER_ERROR, summary)
+            else:
+                # destUrl makes Plasma offer "Open" / "Open Containing Folder"
+                dest = self.done[0] if len(self.done) == 1 else os.path.dirname(self.done[0])
+                self.job.update(destUrl=GLib.filename_to_uri(dest, None))
+                self.job.terminate(0, "")
+        elif self.cancelled or self.failed:
+            notify("dialog-error", "MarkItDown", summary)
+        else:
+            notify("text-markdown", "Converted to Markdown",
+                   "\n".join(os.path.basename(p) for p in self.done))
+        self.loop.quit()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit("usage: markitdown-convert FILE...")
+    if not MARKITDOWN:
+        notify("dialog-error", "MarkItDown not found",
+               "Install it with: pipx install 'markitdown[all]'")
+        sys.exit("markitdown-convert: markitdown not found in PATH")
+    Converter(sys.argv[1:]).run()
