@@ -2,7 +2,9 @@
 
 A right-click **Convert to Markdown** action for KDE Dolphin (and the Plasma
 desktop) that runs Microsoft's [MarkItDown](https://github.com/microsoft/markitdown)
-on a file and saves the result next to it.
+on a file and saves the result next to it. The main use is turning documents
+into lean text before handing them to an AI model; see
+[Why Markdown for AI](#why-markdown-for-ai).
 
 - `Spec Sheet.pdf` → `Spec Sheet.md`
 - `report.final.docx` → `report.final.md` (only the last extension changes)
@@ -17,6 +19,37 @@ conversion leaves no partial `.md` behind.
 The whole thing is one file: a Dolphin service menu whose `Exec=` line is a
 short `sh` loop. No helper script, no Python dependencies beyond MarkItDown
 itself.
+
+## Why Markdown for AI
+
+Language models read and bill by tokens, so how a document reaches the model
+matters as much as what's in it. Converting to Markdown first usually means
+fewer tokens, better answers and less re-uploading:
+
+- **Text only, no page images.** Many AI tools process a PDF as text *plus* an
+  image of every page, and the images cost far more tokens than the words on
+  them. Markdown sends just the text.
+- **No container overhead.** `.docx`, `.xlsx` and `.pptx` are zipped XML. Some
+  tools can't read them at all, and the rest extract text their own way, out of
+  your sight. A `.md` file is exactly what the model will see.
+- **Structure the model understands.** Headings, lists and tables come through
+  as Markdown, a format models are heavily trained on, instead of flattened
+  text with the table layout lost.
+- **Trim before you send.** Open the `.md`, delete the cover page, legal
+  boilerplate or the 40 pages you don't need, and paste only the relevant
+  section. Sending less is usually the biggest saving of all.
+- **Convert once, reuse.** The `.md` sits next to the original, so later chats
+  or coding-agent sessions (Claude Code, Aider, Copilot, …) can read it directly
+  instead of re-parsing the source file every time. It's also greppable and
+  diffs cleanly in git.
+
+A rough size check before pasting: `wc -w file.md`. English text runs about
+1.3 tokens per word, so 3,000 words is roughly 4,000 tokens.
+
+**When to send the original instead:** charts, diagrams, photos, handwriting,
+scanned pages and heavy math don't survive conversion (MarkItDown reads a PDF's
+text layer and does no OCR). If the visuals are the point, give the model the
+PDF or page images.
 
 ## Supported formats
 
