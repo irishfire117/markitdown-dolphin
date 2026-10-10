@@ -10,10 +10,13 @@ on a file and saves the result next to it.
   overwritten. The new file is saved as `name (1).md`, `name (2).md`, …
 - Select several files to convert them all in one go.
 
-While it runs, progress shows in Plasma's notification area just like a Dolphin
-file copy, with a **Cancel** button. Cancelling stops MarkItDown and deletes
-the half-written `.md`. When it finishes, the notification offers to open the
-file or its folder.
+A notification shows "Converting to Markdown" while it runs, then changes to
+"Converted to Markdown" or "Failed: name" with MarkItDown's error. A failed
+conversion leaves no partial `.md` behind.
+
+The whole thing is one file: a Dolphin service menu whose `Exec=` line is a
+short `sh` loop. No helper script, no Python dependencies beyond MarkItDown
+itself.
 
 ## Supported formats
 
@@ -39,14 +42,13 @@ metadata.
 - KDE Plasma 6 / Dolphin (KF6)
 - [MarkItDown](https://github.com/microsoft/markitdown) with its optional
   converters, as a `markitdown` command
-- Python 3 with PyGObject
 - `notify-send` (libnotify)
 
 | Distro | Dependencies |
 | --- | --- |
-| Arch | `sudo pacman -S python-gobject libnotify python-pipx` |
-| Debian / Ubuntu | `sudo apt install python3-gi libnotify-bin pipx` |
-| Fedora | `sudo dnf install python3-gobject libnotify pipx` |
+| Arch | `sudo pacman -S libnotify python-pipx` |
+| Debian / Ubuntu | `sudo apt install libnotify-bin pipx` |
+| Fedora | `sudo dnf install libnotify pipx` |
 
 Then install MarkItDown:
 
@@ -60,54 +62,69 @@ On Arch you can use the AUR package `markitdown-bin` instead.
 
 ```bash
 git clone https://github.com/irishfire117/markitdown-dolphin.git
-cd markitdown-dolphin
-./install.sh
+install -Dm755 markitdown-dolphin/markitdown.desktop ~/.local/share/kio/servicemenus/markitdown.desktop
 ```
 
-This installs for the current user only (no root needed):
-
-| File | Purpose |
-| --- | --- |
-| `~/.local/bin/markitdown-convert` | The converter script |
-| `~/.local/share/kio/servicemenus/markitdown.desktop` | The right-click entry |
-| `~/.local/share/applications/markitdown-convert.desktop` | Hidden entry that gives the progress notification its name and icon |
+The mode matters: KF6 ignores service menus that aren't executable. No root
+needed.
 
 Right-click a supported file and choose **Convert to Markdown**. If the entry
 doesn't appear, close and reopen Dolphin. For desktop icons, log out and back
 in.
 
-To update, `git pull` and run `./install.sh` again.
+To update, `git pull` and run the `install` line again.
+
+### Upgrading from the old Python version
+
+Remove the files the old `install.sh` put in place:
+
+```bash
+rm -f ~/.local/bin/markitdown-convert ~/.local/share/applications/markitdown-convert.desktop
+```
 
 ## Uninstall
 
 ```bash
-./install.sh --uninstall
+rm ~/.local/share/kio/servicemenus/markitdown.desktop
 ```
 
-## Command line
+## How it works
 
-The script works outside Dolphin too:
+The `Exec=` line in `markitdown.desktop`, expanded:
 
-```bash
-markitdown-convert *.pdf
+```sh
+PATH="$PATH:$HOME/.local/bin"            # Dolphin often lacks ~/.local/bin, where pipx puts markitdown
+for f; do                                # every selected file (%F)
+  b="${f%.*}"                            # report.final.docx -> report.final
+  o="$b.md"; n=1
+  while [ -e "$o" ]; do                  # never overwrite: name (1).md, name (2).md, ...
+    o="$b ($n).md"; n=$((n+1))
+  done
+  id=$(notify-send -p ... "Converting to Markdown" "${f##*/}")
+  if err=$(markitdown "$f" -o "$o" 2>&1 >/dev/null); then
+    notify-send -r "$id" ... "Converted to Markdown" "${o##*/}"
+  else
+    rm -f "$o"
+    notify-send -r "$id" ... "Failed: ${f##*/}" "$(echo "$err" | tail -n1)"
+  fi
+done
 ```
 
-Set `MARKITDOWN=/path/to/markitdown` to use a specific MarkItDown binary.
+In the file, `%` is written as `%%` because `%` starts a field code (like `%F`)
+in `.desktop` files.
 
 ## Troubleshooting
 
 - **Menu entry missing.** KF6 only loads service menus that are executable.
   Check with `ls -l ~/.local/share/kio/servicemenus/markitdown.desktop`, then
   restart Dolphin.
-- **"MarkItDown not found" notification.** The script looks on your `PATH` and
-  in `~/.local/bin`. If MarkItDown lives somewhere else, set `MARKITDOWN` in
-  your session environment, e.g. in `~/.config/environment.d/markitdown.conf`.
-- **No progress notification, only a pop-up at the end.** The script falls
-  back to plain notifications when Plasma's job tracker
-  (`org.kde.JobViewServer`) isn't available, e.g. outside Plasma.
+- **"Failed" notification saying `markitdown` was not found.** The action looks on your `PATH` and in
+  `~/.local/bin`. If MarkItDown lives somewhere else, add its directory to the
+  `PATH=` part of the `Exec=` line.
 - **Messy PDF output.** Complex layouts such as textbooks with columns, tables
   and equations convert poorly. That's a limit of MarkItDown's PDF text
-  extraction, not of this action.
+  extraction, not of this action. Scanned PDFs with no text layer come out
+  nearly empty, since MarkItDown doesn't OCR.
 - **A broken file "converts" anyway.** MarkItDown checks what a file actually
   contains, not just its extension. A damaged file may come out as plain text
   instead of failing.

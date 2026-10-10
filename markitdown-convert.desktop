@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=MarkItDown
-Comment=Convert documents to Markdown
-Icon=text-markdown
-Exec=@BINDIR@/markitdown-convert %F
-NoDisplay=true

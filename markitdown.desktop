@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/pdf;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel;text/html;application/xhtml+xml;text/csv;application/json;application/xml;text/xml;application/epub+zip;application/vnd.ms-outlook;application/x-ipynb+json;
+Actions=toMarkdown
+X-KDE-Priority=TopLevel
+
+# name.ext -> name.md next to it (name (1).md if taken). "%%" is a literal "%" in Exec.
+[Desktop Action toMarkdown]
+Name=Convert to Markdown
+Icon=text-markdown
+Exec=sh -c 'PATH="$PATH:$HOME/.local/bin"; for f; do b="${f%%.*}"; o="$b.md"; n=1; while [ -e "$o" ]; do o="$b ($n).md"; n=$((n+1)); done; id=$(notify-send -p -a MarkItDown -i text-markdown "Converting to Markdown" "${f##*/}"); if err=$(markitdown "$f" -o "$o" 2>&1 >/dev/null); then notify-send -r "$id" -a MarkItDown -i text-markdown "Converted to Markdown" "${o##*/}"; else rm -f "$o"; notify-send -r "$id" -a MarkItDown -i dialog-error "Failed: ${f##*/}" "$(echo "$err" | tail -n1)"; fi; done' sh %F
